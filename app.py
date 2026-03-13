@@ -157,35 +157,68 @@ def thin_border():
     s = Side(style="thin", color="D9D9D9")
     return Border(left=s, right=s, top=s, bottom=s)
 
+def _month_day_buckets(s, e):
+    """
+    Given start date s (inclusive) and end date e (exclusive-ish, i.e. the
+    read-end date), return an OrderedDict {month_key: days_count} by walking
+    month boundaries between s and e.
+
+    Special rule: Dec->Jan period puts ALL days into January.
+    """
+    total_days = (e - s).days
+    if total_days <= 0:
+        return OrderedDict([(f"{s.month}/{s.year % 100:02d}", 0)])
+
+    # Dec -> Jan special case: full amount goes to January
+    if s.month == 12 and e.month == 1:
+        mk = f"{e.month}/{e.year % 100:02d}"
+        return OrderedDict([(mk, total_days)])
+
+    buckets = OrderedDict()
+    cur = s
+    while cur < e:
+        # Last day of cur's month
+        last = date(cur.year, cur.month, calendar.monthrange(cur.year, cur.month)[1])
+        # Days from cur until end of this month (or end of period, whichever first)
+        chunk_end = min(last + __import__('datetime').timedelta(days=1), e)
+        days = (chunk_end - cur).days
+        mk = f"{cur.month}/{cur.year % 100:02d}"
+        buckets[mk] = buckets.get(mk, 0) + days
+        cur = chunk_end
+
+    return buckets
+
+
 def prorate_amount(start_str, end_str, amount):
     """
     Split amount across calendar months proportionally by days.
-    Special rule: Dec->Jan always goes fully into January.
+    Handles periods spanning more than two calendar months correctly.
     Returns OrderedDict {month_key: amount}.
     """
     s = parse_date(start_str)
     e = parse_date(end_str)
     total_days = (e - s).days
-    start_mk = month_key(start_str)
-    end_mk   = month_key(end_str)
 
-    if total_days <= 0 or start_mk == end_mk:
-        return OrderedDict([(start_mk, round(amount, 2))])
+    if total_days <= 0:
+        return OrderedDict([(month_key(start_str), round(amount, 2))])
 
-    # December -> January: full amount into January
-    if s.month == 12 and e.month == 1:
-        return OrderedDict([(end_mk, round(amount, 2))])
-
-    last_day_of_start = date(s.year, s.month, calendar.monthrange(s.year, s.month)[1])
-    days_in_start = (min(last_day_of_start, e) - s).days
-    amt_start = round(amount * days_in_start / total_days, 2)
-    amt_end   = round(amount - amt_start, 2)
+    buckets = _month_day_buckets(s, e)
+    if len(buckets) == 1:
+        return OrderedDict([(list(buckets.keys())[0], round(amount, 2))])
 
     result = OrderedDict()
-    if amt_start:
-        result[start_mk] = amt_start
-    if amt_end:
-        result[end_mk] = round(result.get(end_mk, 0.0) + amt_end, 2)
+    allocated = 0.0
+    keys = list(buckets.keys())
+    for i, mk in enumerate(keys):
+        days = buckets[mk]
+        if i == len(keys) - 1:
+            # Last bucket gets the remainder to avoid rounding drift
+            amt = round(amount - allocated, 2)
+        else:
+            amt = round(amount * days / total_days, 2)
+        if amt:
+            result[mk] = round(result.get(mk, 0.0) + amt, 2)
+        allocated += amt
     return result
 
 
@@ -195,30 +228,32 @@ def prorate_with_meta(start_str, end_str, amount):
     so export_excel can write a real Excel formula like =C2*(17/33).
 
     Returns OrderedDict {month_key: {"amount": float, "days": (num, denom) | None}}
+    Handles periods spanning more than two calendar months correctly.
     """
     s = parse_date(start_str)
     e = parse_date(end_str)
     total_days = (e - s).days
-    start_mk = month_key(start_str)
-    end_mk   = month_key(end_str)
 
-    if total_days <= 0 or start_mk == end_mk:
-        return OrderedDict([(start_mk, {"amount": round(amount, 2), "days": None})])
+    if total_days <= 0:
+        return OrderedDict([(month_key(start_str), {"amount": round(amount, 2), "days": None})])
 
-    if s.month == 12 and e.month == 1:
-        return OrderedDict([(end_mk, {"amount": round(amount, 2), "days": None})])
-
-    last_day_of_start = date(s.year, s.month, calendar.monthrange(s.year, s.month)[1])
-    days_in_start = (min(last_day_of_start, e) - s).days
-    days_in_end   = total_days - days_in_start
-    amt_start = round(amount * days_in_start / total_days, 2)
-    amt_end   = round(amount - amt_start, 2)
+    buckets = _month_day_buckets(s, e)
+    if len(buckets) == 1:
+        mk = list(buckets.keys())[0]
+        return OrderedDict([(mk, {"amount": round(amount, 2), "days": None})])
 
     result = OrderedDict()
-    if amt_start:
-        result[start_mk] = {"amount": amt_start, "days": (days_in_start, total_days)}
-    if amt_end:
-        result[end_mk]   = {"amount": amt_end,   "days": (days_in_end,   total_days)}
+    allocated = 0.0
+    keys = list(buckets.keys())
+    for i, mk in enumerate(keys):
+        days = buckets[mk]
+        if i == len(keys) - 1:
+            amt = round(amount - allocated, 2)
+        else:
+            amt = round(amount * days / total_days, 2)
+        if amt:
+            result[mk] = {"amount": amt, "days": (days, total_days)}
+        allocated += amt
     return result
 
 
@@ -227,7 +262,6 @@ def add_proration(allocations, formulas, start_str, end_str, amount):
     for mk, meta in prorate_with_meta(start_str, end_str, amount).items():
         allocations[mk] = round(allocations.get(mk, 0.0) + meta["amount"], 2)
         if meta["days"]:
-            # Store as list of (num, denom) tuples; multiple blocks can land in same month
             formulas.setdefault(mk, []).append(meta["days"])
 
 
@@ -820,4 +854,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v10 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v11 · Forty Acres Energy</div>', unsafe_allow_html=True)
