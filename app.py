@@ -427,35 +427,40 @@ def parse_non_recurring(pdf):
     """
     Find NON-RECURRING CHARGES/CREDITS SUMMARY and return list of
     {"description": str, "amount": float}. Skips header and total lines.
+    Parses across ALL pages as one stream so page breaks don't reset state.
     """
+    # Concatenate all page text first so page boundaries don't break parsing
+    full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    lines = full_text.splitlines()
+
     charges = []
-    for page in pdf.pages:
-        text = page.extract_text() or ""
-        if not _NRC_SECTION_RE.search(text):
+    in_section = False
+
+    for line in lines:
+        line = line.strip()
+        if _NRC_SECTION_RE.search(line):
+            in_section = True
             continue
-        lines = text.splitlines()
-        in_section = False
-        for line in lines:
-            line = line.strip()
-            if _NRC_SECTION_RE.search(line):
-                in_section = True
-                continue
-            if not in_section:
-                continue
-            # Stop at next major section
-            if re.match(r"(INFORMATION ABOUT|PREMISES SUMMARY|ELECTRICITY SERVICE|^Page \d)", line, re.I):
-                break
-            # Skip header/empty/total lines
-            if not line or re.match(r"(DESCRIPTION|CURRENT BILL)", line, re.I):
-                continue
-            if re.match(r"Total\s+\$", line, re.I):
-                continue
-            m = _NRC_ITEM_RE.match(line)
-            if m:
-                desc = m.group(1).strip()
-                amt  = parse_money(m.group(2))
-                if desc and amt and amt > 0:
-                    charges.append({"description": desc.title(), "amount": amt})
+        if not in_section:
+            continue
+        # Stop at next major section
+        if re.match(
+            r"(INFORMATION ABOUT YOUR BILL|PREMISES SUMMARY|ELECTRICITY SERVICE|^Page\s+\d)",
+            line, re.I
+        ):
+            break
+        # Skip header/empty/total lines
+        if not line or re.match(r"(DESCRIPTION|CURRENT BILL)", line, re.I):
+            continue
+        if re.match(r"Total\s+\$", line, re.I):
+            continue
+        m = _NRC_ITEM_RE.match(line)
+        if m:
+            desc = m.group(1).strip()
+            amt  = parse_money(m.group(2))
+            if desc and amt and amt > 0:
+                charges.append({"description": desc.title(), "amount": amt})
+
     # Deduplicate
     seen = set()
     unique = []
@@ -465,7 +470,6 @@ def parse_non_recurring(pdf):
             seen.add(key)
             unique.append(c)
     return unique
-
 
 # ─────────────────────────────────────────────
 # 5. Bill orchestration
