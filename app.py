@@ -178,6 +178,8 @@ _BILLED_RE     = re.compile(r"^(\d{9})\s+(.+?)\s+\$([\d,]+\.\d{2})(\s|$)")
 _NOT_INC_RE    = re.compile(r"^(\d{9})\s+(.+?)\s+NOT\s*INCLUDED(\s|$)", re.I)
 _DATE_IDENT_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 _PREM_NUM_RE   = re.compile(r"^(\d{9})\s+(.+)$")
+_NRC_SECTION_RE = re.compile(r"NON.RECURRING\s+CHARGES", re.I)
+_NRC_ITEM_RE    = re.compile(r"^(.+?)\s+\$([\d,]+\.\d{2})(\s|$)")
 _MONEY_RE      = re.compile(r"^\$([\d,]+\.\d{2})\s*$")
 _NI_ONLY_RE    = re.compile(r"^NOT\s*INCLUDED\s*$", re.I)
 
@@ -311,11 +313,41 @@ def allocate(text):
             allocations[end_mk] = round(allocations.get(end_mk, 0.0) + remainder, 2)
     return allocations, premises_total, blocks
 
+
+def parse_non_recurring(pdf):
+    charges = []
+    for page in pdf.pages:
+        text = page.extract_text() or ""
+        if not _NRC_SECTION_RE.search(text):
+            continue
+        lines = text.splitlines()
+        in_section = False
+        for line in lines:
+            line = line.strip()
+            if _NRC_SECTION_RE.search(line):
+                in_section = True; continue
+            if not in_section: continue
+            if re.match(r"(INFORMATION ABOUT|PREMISES SUMMARY|ELECTRICITY SERVICE|^Page \d)", line, re.I): break
+            if not line or re.match(r"(DESCRIPTION|CURRENT BILL)", line, re.I): continue
+            if re.match(r"Total\s+\$", line, re.I): continue
+            m = _NRC_ITEM_RE.match(line)
+            if m:
+                desc = m.group(1).strip(); amt = parse_money(m.group(2))
+                if desc and amt and amt > 0:
+                    charges.append({"description": desc.title(), "amount": amt})
+    seen = set(); unique = []
+    for c in charges:
+        key = (c["description"], c["amount"])
+        if key not in seen:
+            seen.add(key); unique.append(c)
+    return unique
+
 def parse_bill(pdf_bytes):
     rows = []; all_months = set()
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         summary = parse_summary(pdf)
         details = extract_detail_sections(pdf)
+        non_recurring = parse_non_recurring(pdf)
     for premise, info in summary.items():
         if info["current_bill"] is None:
             continue
@@ -341,7 +373,7 @@ def parse_bill(pdf_bytes):
             all_months.update(allocs.keys())
         rows.append(row)
     sorted_months = sorted(all_months, key=lambda x: (int(x.split("/")[1]), int(x.split("/")[0])))
-    return rows, sorted_months
+    return rows, sorted_months, non_recurring
 
 def thin_border():
     s = Side(style="thin", color="D9D9D9")
@@ -355,7 +387,7 @@ TOT_FILL  = PatternFill("solid", start_color="EDEDED")
 YLW_FILL  = PatternFill("solid", start_color="FFF200")
 BASE_FONT = Font(name="Arial")
 
-def export_excel(rows, month_cols, statement_number):
+def export_excel(rows, month_cols, statement_number, non_recurring=None):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Xcel Allocations"
@@ -386,6 +418,18 @@ def export_excel(rows, month_cols, statement_number):
         ws.cell(ri, COL_NOTES, row["notes"])
         for ci in range(1, COL_NOTES + 1):
             c = ws.cell(ri, ci); c.border = thin_border(); c.fill = ROW_FILL
+    NRC_FILL = PatternFill("solid", start_color="FFF9E6")
+    if non_recurring:
+        for nrc in non_recurring:
+            nrc_ri = ws.max_row + 1
+            ws.cell(nrc_ri, 2, nrc["description"]).font = Font(bold=True, name="Arial")
+            c = ws.cell(nrc_ri, COL_CB, nrc["amount"]); c.number_format = MONEY_FMT; c.font = Font(bold=True, name="Arial")
+            if month_cols:
+                c2 = ws.cell(nrc_ri, COL_M0 + len(month_cols) - 1, nrc["amount"]); c2.number_format = MONEY_FMT
+            c3 = ws.cell(nrc_ri, COL_TOTAL, nrc["amount"]); c3.number_format = MONEY_FMT; c3.font = Font(bold=True, name="Arial")
+            ws.cell(nrc_ri, COL_NOTES, "NON-RECURRING CHARGE")
+            for ci in range(1, COL_NOTES + 1):
+                c = ws.cell(nrc_ri, ci); c.border = thin_border(); c.fill = NRC_FILL
     tr = ws.max_row + 1; last_data = tr - 1
     ws.cell(tr, 1, "Total")
     for ci in range(1, COL_NOTES + 1):
@@ -445,13 +489,13 @@ else:
     with st.spinner("Processing bill..."):
         try:
             pdf_bytes = uploaded.read()
-            rows, month_cols = parse_bill(pdf_bytes)
+            rows, month_cols, non_recurring = parse_bill(pdf_bytes)
 
             if not rows:
                 st.markdown('<div class="warn-box">⚠️ No billed premises found in this PDF. Make sure it\'s an Xcel Energy bill.</div>', unsafe_allow_html=True)
             else:
                 statement_number = uploaded.name.replace(".pdf", "").replace(".PDF", "")
-                excel_bytes = export_excel(rows, month_cols, statement_number)
+                excel_bytes = export_excel(rows, month_cols, statement_number, non_recurring)
 
                 total_bill = sum(r["current_bill"] for r in rows if r["current_bill"])
                 meter_changes = sum(1 for r in rows if "METER CHANGE" in r.get("notes",""))
