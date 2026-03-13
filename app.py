@@ -135,12 +135,13 @@ st.markdown("""
 
 
 # ─────────────────────────────────────────────
-# Parser logic (v7)
+# 0. Helpers
 # ─────────────────────────────────────────────
 
 def parse_money(s):
-    if s is None: return None
-    cleaned = str(s).replace("$","").replace(",","").replace("CR","").strip()
+    if s is None:
+        return None
+    cleaned = str(s).replace("$", "").replace(",", "").replace("CR", "").replace("-", "").strip()
     return float(cleaned) if cleaned else None
 
 def parse_date(mmddyy):
@@ -151,40 +152,91 @@ def month_key(mmddyy):
     m, _, y = mmddyy.split("/")
     return f"{int(m)}/{y}"
 
+def thin_border():
+    s = Side(style="thin", color="D9D9D9")
+    return Border(left=s, right=s, top=s, bottom=s)
+
+def safe_save(wb, path):
+    try:
+        wb.save(path)
+        return path
+    except PermissionError:
+        alt = path.with_name(f"{path.stem}_{int(time.time())}{path.suffix}")
+        wb.save(alt)
+        return alt
+
 def prorate_amount(start_str, end_str, amount):
+    """
+    Split amount across calendar months proportionally by days.
+    Special rule: Dec->Jan always goes fully into January.
+    Returns OrderedDict {month_key: amount}.
+    """
     s = parse_date(start_str)
     e = parse_date(end_str)
     total_days = (e - s).days
     start_mk = month_key(start_str)
     end_mk   = month_key(end_str)
+
     if total_days <= 0 or start_mk == end_mk:
         return OrderedDict([(start_mk, round(amount, 2))])
+
+    # December -> January: full amount into January
     if s.month == 12 and e.month == 1:
         return OrderedDict([(end_mk, round(amount, 2))])
+
     last_day_of_start = date(s.year, s.month, calendar.monthrange(s.year, s.month)[1])
     days_in_start = (min(last_day_of_start, e) - s).days
     amt_start = round(amount * days_in_start / total_days, 2)
     amt_end   = round(amount - amt_start, 2)
+
     result = OrderedDict()
-    if amt_start: result[start_mk] = amt_start
-    if amt_end:   result[end_mk]   = round(result.get(end_mk, 0.0) + amt_end, 2)
+    if amt_start:
+        result[start_mk] = amt_start
+    if amt_end:
+        result[end_mk] = round(result.get(end_mk, 0.0) + amt_end, 2)
     return result
 
 def add_proration(allocations, start_str, end_str, amount):
     for mk, val in prorate_amount(start_str, end_str, amount).items():
         allocations[mk] = round(allocations.get(mk, 0.0) + val, 2)
 
-_BILLED_RE     = re.compile(r"^(\d{9})\s+(.+?)\s+\$([\d,]+\.\d{2})(\s|$)")
+
+# ─────────────────────────────────────────────
+# 1. Summary parsing
+# ─────────────────────────────────────────────
+
+# Captures: (premise#) (identifier) (optional -) $(amount) (optional CR) (space or end)
+# Barcode/QR junk after the amount is ignored.
+_BILLED_RE     = re.compile(r"^(\d{9})\s+(.+?)\s+(-?)\$([\d,]+\.\d{2})\s*(CR)?(\s|$)", re.I)
 _NOT_INC_RE    = re.compile(r"^(\d{9})\s+(.+?)\s+NOT\s*INCLUDED(\s|$)", re.I)
 _DATE_IDENT_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 _PREM_NUM_RE   = re.compile(r"^(\d{9})\s+(.+)$")
-_NRC_SECTION_RE = re.compile(r"NON.RECURRING\s+CHARGES", re.I)
-_NRC_ITEM_RE    = re.compile(r"^(.+?)\s+\$([\d,]+\.\d{2})(\s|$)")
-_MONEY_RE      = re.compile(r"^\$([\d,]+\.\d{2})\s*$")
+_MONEY_RE      = re.compile(r"^(-?)\$([\d,]+\.\d{2})\s*(CR)?\s*$", re.I)
 _NI_ONLY_RE    = re.compile(r"^NOT\s*INCLUDED\s*$", re.I)
 
 def _clean_identifier(raw):
     return re.sub(r"\s+", " ", raw).strip().rstrip("_").strip()
+
+def _bill_amount_from_match(m):
+    """Extract signed dollar amount from a _BILLED_RE match."""
+    neg = m.group(3) == "-"
+    cr  = bool(m.group(5))
+    amt = parse_money(m.group(4))
+    if amt is not None and (neg or cr):
+        amt = -amt
+    return amt
+
+def _bill_amount_from_next_line(nxt):
+    """Extract signed dollar amount from a standalone money line, or None."""
+    mm = _MONEY_RE.match(nxt)
+    if not mm:
+        return None, False
+    neg = mm.group(1) == "-"
+    cr  = bool(mm.group(3))
+    amt = parse_money(mm.group(2))
+    if amt is not None and (neg or cr):
+        amt = -amt
+    return amt, True
 
 def parse_summary(pdf):
     summary = OrderedDict()
@@ -196,6 +248,8 @@ def parse_summary(pdf):
         i = 0
         while i < len(lines):
             line = lines[i]
+
+            # Fully-contained billed line (positive or credit)
             m = _BILLED_RE.match(line)
             if m:
                 ident = m.group(2).strip()
@@ -203,9 +257,12 @@ def parse_summary(pdf):
                     summary[m.group(1)] = {
                         "premises_number":     m.group(1),
                         "premises_identifier": _clean_identifier(ident),
-                        "current_bill":        parse_money(m.group(3)),
+                        "current_bill":        _bill_amount_from_match(m),
                     }
-                i += 1; continue
+                i += 1
+                continue
+
+            # Fully-contained NOT INCLUDED line
             m = _NOT_INC_RE.match(line)
             if m:
                 summary[m.group(1)] = {
@@ -213,37 +270,46 @@ def parse_summary(pdf):
                     "premises_identifier": _clean_identifier(m.group(2)),
                     "current_bill":        None,
                 }
-                i += 1; continue
+                i += 1
+                continue
+
+            # Premise# + identifier with amount or NI on NEXT line
             m = _PREM_NUM_RE.match(line)
             if m:
-                pnum = m.group(1); ident = m.group(2).strip()
+                pnum  = m.group(1)
+                ident = m.group(2).strip()
                 if not _DATE_IDENT_RE.match(ident) and i + 1 < len(lines):
-                    nxt = lines[i+1].strip()
-                    mm = _MONEY_RE.match(nxt)
-                    if mm:
+                    nxt = lines[i + 1].strip()
+                    amt, matched = _bill_amount_from_next_line(nxt)
+                    if matched:
                         summary[pnum] = {
                             "premises_number":     pnum,
                             "premises_identifier": _clean_identifier(ident),
-                            "current_bill":        parse_money(mm.group(1)),
+                            "current_bill":        amt,
                         }
-                        i += 2; continue
+                        i += 2
+                        continue
                     if _NI_ONLY_RE.match(nxt):
                         summary[pnum] = {
                             "premises_number":     pnum,
                             "premises_identifier": _clean_identifier(ident),
                             "current_bill":        None,
                         }
-                        i += 2; continue
+                        i += 2
+                        continue
             i += 1
     return summary
 
+
+# ─────────────────────────────────────────────
+# 2. Detail section extraction
+# ─────────────────────────────────────────────
+
 _PREMISE_HDR_RE = re.compile(r"PREMISES?\s*NUMBER:\s*(\d{9})", re.I)
-_DATE_RE = re.compile(r"Read\s*Dates:\s*(\d{2}/\d{2}/\d{2})\s*-\s*(\d{2}/\d{2}/\d{2})", re.I)
-_SUB_RE  = re.compile(r"Sub\s*total\s*\$([\d,]+\.\d{2})", re.I)
 
 def extract_detail_sections(pdf):
     sections = OrderedDict()
-    current = None
+    current  = None
     for page in pdf.pages:
         text = page.extract_text() or ""
         m = _PREMISE_HDR_RE.search(text)
@@ -254,22 +320,40 @@ def extract_detail_sections(pdf):
             sections[current] += "\n" + text
     return sections
 
+
+# ─────────────────────────────────────────────
+# 3. Block extraction
+# ─────────────────────────────────────────────
+
+_DATE_RE = re.compile(
+    r"Read\s*Dates:\s*(\d{2}/\d{2}/\d{2})\s*-\s*(\d{2}/\d{2}/\d{2})", re.I)
+_SUB_RE  = re.compile(r"Sub\s*total\s*\$([\d,]+\.\d{2})", re.I)
+
 def extract_blocks(text):
     flat = re.sub(r"\s+", " ", text)
     date_matches = list(_DATE_RE.finditer(flat))
     sub_matches  = list(_SUB_RE.finditer(flat))
-    blocks = []; sub_idx = 0
+    blocks  = []
+    sub_idx = 0
     for i, dm in enumerate(date_matches):
         block_start = dm.end()
         block_end   = date_matches[i+1].start() if i+1 < len(date_matches) else len(flat)
-        subtotal = None
+        subtotal    = None
         while sub_idx < len(sub_matches):
             sm = sub_matches[sub_idx]
-            if sm.start() < block_start: sub_idx += 1
+            if sm.start() < block_start:
+                sub_idx += 1
             elif sm.start() < block_end:
-                subtotal = parse_money(sm.group(1)); sub_idx += 1; break
-            else: break
-        blocks.append({"start_date": dm.group(1), "end_date": dm.group(2), "subtotal": subtotal})
+                subtotal = parse_money(sm.group(1))
+                sub_idx += 1
+                break
+            else:
+                break
+        blocks.append({
+            "start_date": dm.group(1),
+            "end_date":   dm.group(2),
+            "subtotal":   subtotal,
+        })
     return blocks
 
 def extract_premises_total(text):
@@ -277,31 +361,48 @@ def extract_premises_total(text):
     m = re.search(r"Premises\s*Total\s*\$([\d,]+\.\d{2})", flat, re.I)
     return parse_money(m.group(1)) if m else None
 
+
+# ─────────────────────────────────────────────
+# 4. Premise allocation
+# ─────────────────────────────────────────────
+
 def allocate(text):
-    blocks = extract_blocks(text)
+    blocks         = extract_blocks(text)
     premises_total = extract_premises_total(text)
-    allocations = OrderedDict()
+    allocations    = OrderedDict()
+
     if not blocks or premises_total is None:
         return allocations, premises_total, blocks
+
+    # Single block: pro-rate across month boundary if needed
     if len(blocks) == 1:
         b = blocks[0]
         add_proration(allocations, b["start_date"], b["end_date"], premises_total)
         return allocations, premises_total, blocks
+
+    # Multiple blocks (meter change)
     total_subtotals = sum(b["subtotal"] for b in blocks if b["subtotal"] is not None)
+
     if total_subtotals > premises_total + 0.005:
+        # OVERFLOW: assign each block's amount to its start month (no pro-ration),
+        # capped by remaining budget.
         budget = premises_total
         for block in blocks:
-            if block["subtotal"] is None or budget < 0.005: break
+            if block["subtotal"] is None or budget < 0.005:
+                break
             amount = min(block["subtotal"], round(budget, 2))
             mk = month_key(block["start_date"])
             allocations[mk] = round(allocations.get(mk, 0.0) + amount, 2)
             budget = round(budget - amount, 2)
-        current_sum = round(sum(allocations.values()), 2)
-        diff = round(premises_total - current_sum, 2)
+        # Absorb rounding residual
+        diff = round(premises_total - round(sum(allocations.values()), 2), 2)
         if abs(diff) >= 0.01 and allocations:
             last_key = list(allocations.keys())[-1]
             allocations[last_key] = round(allocations[last_key] + diff, 2)
+
     else:
+        # NORMAL: each block's subtotal pro-rated across its month boundary;
+        # remainder goes to end month of last block.
         subtotal_sum = 0.0
         for block in blocks:
             if block["subtotal"] is not None:
@@ -311,10 +412,22 @@ def allocate(text):
         if abs(remainder) >= 0.01:
             end_mk = month_key(blocks[-1]["end_date"])
             allocations[end_mk] = round(allocations.get(end_mk, 0.0) + remainder, 2)
+
     return allocations, premises_total, blocks
 
 
+# ─────────────────────────────────────────────
+# 4b. Non-recurring charges parsing
+# ─────────────────────────────────────────────
+
+_NRC_SECTION_RE = re.compile(r"NON.RECURRING\s+CHARGES", re.I)
+_NRC_ITEM_RE    = re.compile(r"^(.+?)\s+\$([\d,]+\.\d{2})(\s|$)")
+
 def parse_non_recurring(pdf):
+    """
+    Find NON-RECURRING CHARGES/CREDITS SUMMARY and return list of
+    {"description": str, "amount": float}. Skips header and total lines.
+    """
     charges = []
     for page in pdf.pages:
         text = page.extract_text() or ""
@@ -325,32 +438,53 @@ def parse_non_recurring(pdf):
         for line in lines:
             line = line.strip()
             if _NRC_SECTION_RE.search(line):
-                in_section = True; continue
-            if not in_section: continue
-            if re.match(r"(INFORMATION ABOUT|PREMISES SUMMARY|ELECTRICITY SERVICE|^Page \d)", line, re.I): break
-            if not line or re.match(r"(DESCRIPTION|CURRENT BILL)", line, re.I): continue
-            if re.match(r"Total\s+\$", line, re.I): continue
+                in_section = True
+                continue
+            if not in_section:
+                continue
+            # Stop at next major section
+            if re.match(r"(INFORMATION ABOUT|PREMISES SUMMARY|ELECTRICITY SERVICE|^Page \d)", line, re.I):
+                break
+            # Skip header/empty/total lines
+            if not line or re.match(r"(DESCRIPTION|CURRENT BILL)", line, re.I):
+                continue
+            if re.match(r"Total\s+\$", line, re.I):
+                continue
             m = _NRC_ITEM_RE.match(line)
             if m:
-                desc = m.group(1).strip(); amt = parse_money(m.group(2))
+                desc = m.group(1).strip()
+                amt  = parse_money(m.group(2))
                 if desc and amt and amt > 0:
                     charges.append({"description": desc.title(), "amount": amt})
-    seen = set(); unique = []
+    # Deduplicate
+    seen = set()
+    unique = []
     for c in charges:
         key = (c["description"], c["amount"])
         if key not in seen:
-            seen.add(key); unique.append(c)
+            seen.add(key)
+            unique.append(c)
     return unique
 
+
+# ─────────────────────────────────────────────
+# 5. Bill orchestration
+# ─────────────────────────────────────────────
+
 def parse_bill(pdf_bytes):
-    rows = []; all_months = set()
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        summary = parse_summary(pdf)
-        details = extract_detail_sections(pdf)
-        non_recurring = parse_non_recurring(pdf)
+        summary        = parse_summary(pdf)
+        details        = extract_detail_sections(pdf)
+        non_recurring  = parse_non_recurring(pdf)
+
+    rows       = []
+    all_months = set()
+
     for premise, info in summary.items():
+        # Skip NOT INCLUDED (current_bill is None)
         if info["current_bill"] is None:
             continue
+
         row = {
             "premises_number":     premise,
             "premises_identifier": info["premises_identifier"],
@@ -360,6 +494,7 @@ def parse_bill(pdf_bytes):
             "diff":                None,
             "notes":               "",
         }
+
         if premise in details:
             allocs, _, blocks = allocate(details[premise])
             row["months"] = allocs
@@ -371,9 +506,18 @@ def parse_bill(pdf_bytes):
             elif details.get(premise, "") and "estimate" in details[premise].lower():
                 row["notes"] = "ESTIMATED"
             all_months.update(allocs.keys())
+        elif info["current_bill"] is not None:
+            # Has a bill amount but no detail page — put full amount in notes
+            row["notes"] = "NO DETAIL PAGE"
+
         rows.append(row)
-    sorted_months = sorted(all_months, key=lambda x: (int(x.split("/")[1]), int(x.split("/")[0])))
+
+    sorted_months = sorted(
+        all_months,
+        key=lambda x: (int(x.split("/")[1]), int(x.split("/")[0])),
+    )
     return rows, sorted_months, non_recurring
+
 
 def thin_border():
     s = Side(style="thin", color="D9D9D9")
@@ -387,63 +531,108 @@ TOT_FILL  = PatternFill("solid", start_color="EDEDED")
 YLW_FILL  = PatternFill("solid", start_color="FFF200")
 BASE_FONT = Font(name="Arial")
 
-def export_excel(rows, month_cols, statement_number, non_recurring=None):
+def export_excel(rows, month_cols, statement_number, output_path, non_recurring=None):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Xcel Allocations"
-    headers = ["PREMISES NUMBER", "PREMISES IDENTIFIER", "CURRENT BILL"] + month_cols + ["TOTAL", "DIFF", "NOTES"]
-    COL_CB = 3; COL_M0 = 4
+
+    headers = (
+        ["PREMISES NUMBER", "PREMISES IDENTIFIER", "CURRENT BILL"]
+        + month_cols
+        + ["TOTAL", "DIFF", "NOTES"]
+    )
+    COL_CB    = 3
+    COL_M0    = 4
     COL_TOTAL = COL_M0 + len(month_cols)
     COL_DIFF  = COL_TOTAL + 1
     COL_NOTES = COL_DIFF + 1
+
+    # Header row
     for ci, h in enumerate(headers, 1):
         c = ws.cell(1, ci, h)
-        c.font = HDR_FONT; c.fill = HDR_FILL
+        c.font      = HDR_FONT
+        c.fill      = HDR_FILL
         c.alignment = Alignment(horizontal="center", vertical="center")
-        c.border = thin_border()
+        c.border    = thin_border()
+
+    # Data rows
     for ri, row in enumerate(rows, 2):
         ws.cell(ri, 1, row["premises_number"]).font = BASE_FONT
         ws.cell(ri, 2, row["premises_identifier"]).font = BASE_FONT
+
         c = ws.cell(ri, COL_CB, row["current_bill"])
-        if row["current_bill"] is not None: c.number_format = MONEY_FMT
+        if row["current_bill"] is not None:
+            c.number_format = MONEY_FMT
+
         for mi, mon in enumerate(month_cols):
             val = row["months"].get(mon)
             c = ws.cell(ri, COL_M0 + mi, val)
-            if val is not None: c.number_format = MONEY_FMT
+            if val is not None:
+                c.number_format = MONEY_FMT
+
         c = ws.cell(ri, COL_TOTAL, row["total"])
         if row["total"] is not None:
-            c.number_format = MONEY_FMT; c.font = Font(bold=True, name="Arial")
+            c.number_format = MONEY_FMT
+            c.font = Font(bold=True, name="Arial")
+
         c = ws.cell(ri, COL_DIFF, row["diff"])
-        if row["diff"] is not None: c.number_format = MONEY_FMT
+        if row["diff"] is not None:
+            c.number_format = MONEY_FMT
+
         ws.cell(ri, COL_NOTES, row["notes"])
+
         for ci in range(1, COL_NOTES + 1):
-            c = ws.cell(ri, ci); c.border = thin_border(); c.fill = ROW_FILL
-    NRC_FILL = PatternFill("solid", start_color="FFF9E6")
+            c        = ws.cell(ri, ci)
+            c.border = thin_border()
+            c.fill   = ROW_FILL
+
+    # Non-recurring charge rows (late fees, etc.) — yellow highlight
     if non_recurring:
         for nrc in non_recurring:
             nrc_ri = ws.max_row + 1
             ws.cell(nrc_ri, 2, nrc["description"]).font = Font(bold=True, name="Arial")
-            c = ws.cell(nrc_ri, COL_CB, nrc["amount"]); c.number_format = MONEY_FMT; c.font = Font(bold=True, name="Arial")
+            c = ws.cell(nrc_ri, COL_CB, nrc["amount"])
+            c.number_format = MONEY_FMT
+            c.font = Font(bold=True, name="Arial")
+            # Place in last month column
             if month_cols:
-                c2 = ws.cell(nrc_ri, COL_M0 + len(month_cols) - 1, nrc["amount"]); c2.number_format = MONEY_FMT
-            c3 = ws.cell(nrc_ri, COL_TOTAL, nrc["amount"]); c3.number_format = MONEY_FMT; c3.font = Font(bold=True, name="Arial")
+                last_m_col = COL_M0 + len(month_cols) - 1
+                c2 = ws.cell(nrc_ri, last_m_col, nrc["amount"])
+                c2.number_format = MONEY_FMT
+            c3 = ws.cell(nrc_ri, COL_TOTAL, nrc["amount"])
+            c3.number_format = MONEY_FMT
+            c3.font = Font(bold=True, name="Arial")
             ws.cell(nrc_ri, COL_NOTES, "NON-RECURRING CHARGE")
             for ci in range(1, COL_NOTES + 1):
-                c = ws.cell(nrc_ri, ci); c.border = thin_border(); c.fill = NRC_FILL
-    tr = ws.max_row + 1; last_data = tr - 1
+                c        = ws.cell(nrc_ri, ci)
+                c.border = thin_border()
+                c.fill   = NRC_FILL
+
+    # Totals row
+    tr        = ws.max_row + 1
+    last_data = tr - 1
     ws.cell(tr, 1, "Total")
     for ci in range(1, COL_NOTES + 1):
-        c = ws.cell(tr, ci); c.fill = TOT_FILL; c.border = thin_border()
-        c.font = Font(bold=True, name="Arial")
+        c        = ws.cell(tr, ci)
+        c.fill   = TOT_FILL
+        c.border = thin_border()
+        c.font   = Font(bold=True, name="Arial")
     for ci in range(COL_CB, COL_TOTAL + 1):
         col_ltr = get_column_letter(ci)
         c = ws.cell(tr, ci, f"=SUM({col_ltr}2:{col_ltr}{last_data})")
-        c.number_format = MONEY_FMT; c.font = Font(bold=True, name="Arial")
+        c.number_format = MONEY_FMT
+        c.font = Font(bold=True, name="Arial")
+
+    # Statement number label
     nr = tr + 2
     ws.merge_cells(start_row=nr, start_column=2, end_row=nr, end_column=4)
-    c = ws.cell(nr, 2, statement_number)
-    c.fill = YLW_FILL; c.font = Font(bold=True, name="Arial")
-    c.alignment = Alignment(horizontal="center"); c.border = thin_border()
+    c           = ws.cell(nr, 2, statement_number)
+    c.fill      = YLW_FILL
+    c.font      = Font(bold=True, name="Arial")
+    c.alignment = Alignment(horizontal="center")
+    c.border    = thin_border()
+
+    # Column widths
     ws.column_dimensions["A"].width = 18
     ws.column_dimensions["B"].width = 40
     ws.column_dimensions[get_column_letter(COL_CB)].width = 14
@@ -453,10 +642,9 @@ def export_excel(rows, month_cols, statement_number, non_recurring=None):
     ws.column_dimensions[get_column_letter(COL_DIFF)].width  = 12
     ws.column_dimensions[get_column_letter(COL_NOTES)].width = 24
     ws.freeze_panes = "A2"
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.getvalue()
+
+    return safe_save(wb, output_path)
+
 
 
 # ─────────────────────────────────────────────
