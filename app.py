@@ -495,7 +495,17 @@ def parse_bill(pdf_bytes):
             "notes":               "",
         }
 
-        if premise in details:
+        if info["current_bill"] < 0:
+            row["notes"] = "CREDIT"
+            if premise in details:
+                _cr_blocks = extract_blocks(details[premise])
+                if _cr_blocks:
+                    mk = month_key(_cr_blocks[-1]["end_date"])
+                    row["months"][mk] = info["current_bill"]
+                    all_months.add(mk)
+            row["total"] = info["current_bill"]
+            row["diff"]  = 0.0
+        elif premise in details:
             allocs, _, blocks = allocate(details[premise])
             row["months"] = allocs
             row["total"]  = round(sum(allocs.values()), 2) if allocs else None
@@ -528,10 +538,11 @@ HDR_FILL  = PatternFill("solid", start_color="1F1F1F")
 HDR_FONT  = Font(color="FFFFFF", bold=True, name="Arial")
 ROW_FILL  = PatternFill("solid", start_color="DCE6F1")
 TOT_FILL  = PatternFill("solid", start_color="EDEDED")
+NRC_FILL  = PatternFill("solid", start_color="FFF9E6")
 YLW_FILL  = PatternFill("solid", start_color="FFF200")
 BASE_FONT = Font(name="Arial")
 
-def export_excel(rows, month_cols, statement_number, output_path, non_recurring=None):
+def export_excel(rows, month_cols, statement_number, non_recurring=None):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Xcel Allocations"
@@ -643,8 +654,10 @@ def export_excel(rows, month_cols, statement_number, output_path, non_recurring=
     ws.column_dimensions[get_column_letter(COL_NOTES)].width = 24
     ws.freeze_panes = "A2"
 
-    return safe_save(wb, output_path)
-
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # ─────────────────────────────────────────────
