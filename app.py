@@ -655,7 +655,7 @@ st.markdown("""
 <div class="hero">
     <span class="bolt">⚡</span>
     <h1>Xcel Bill Processor</h1>
-    <p>Upload an Xcel Energy PDF bill — get a allocation Excel file instantly</p>
+    <p>Upload an Xcel Energy PDF bill — get a monthly allocation Excel file instantly</p>
 </div>
 """, unsafe_allow_html=True)
 
