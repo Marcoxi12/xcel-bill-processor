@@ -10,6 +10,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+
 # ─────────────────────────────────────────────
 # Page config
 # ─────────────────────────────────────────────
@@ -156,15 +157,6 @@ def thin_border():
     s = Side(style="thin", color="D9D9D9")
     return Border(left=s, right=s, top=s, bottom=s)
 
-def safe_save(wb, path):
-    try:
-        wb.save(path)
-        return path
-    except PermissionError:
-        alt = path.with_name(f"{path.stem}_{int(time.time())}{path.suffix}")
-        wb.save(alt)
-        return alt
-
 def prorate_amount(start_str, end_str, amount):
     """
     Split amount across calendar months proportionally by days.
@@ -196,17 +188,61 @@ def prorate_amount(start_str, end_str, amount):
         result[end_mk] = round(result.get(end_mk, 0.0) + amt_end, 2)
     return result
 
-def add_proration(allocations, start_str, end_str, amount):
-    for mk, val in prorate_amount(start_str, end_str, amount).items():
-        allocations[mk] = round(allocations.get(mk, 0.0) + val, 2)
+
+def prorate_with_meta(start_str, end_str, amount):
+    """
+    Like prorate_amount but returns per-month metadata including the
+    day-split formula string used for proration.
+
+    Returns OrderedDict {month_key: {"amount": float, "formula": str|None}}
+    formula example: "18 of 31 days"  (None when no split needed)
+    """
+    s = parse_date(start_str)
+    e = parse_date(end_str)
+    total_days = (e - s).days
+    start_mk = month_key(start_str)
+    end_mk   = month_key(end_str)
+
+    if total_days <= 0 or start_mk == end_mk:
+        return OrderedDict([(start_mk, {"amount": round(amount, 2), "formula": None})])
+
+    if s.month == 12 and e.month == 1:
+        return OrderedDict([(end_mk, {"amount": round(amount, 2), "formula": None})])
+
+    last_day_of_start = date(s.year, s.month, calendar.monthrange(s.year, s.month)[1])
+    days_in_start = (min(last_day_of_start, e) - s).days
+    days_in_end   = total_days - days_in_start
+    amt_start = round(amount * days_in_start / total_days, 2)
+    amt_end   = round(amount - amt_start, 2)
+
+    result = OrderedDict()
+    if amt_start:
+        result[start_mk] = {
+            "amount":  amt_start,
+            "formula": f"{days_in_start} of {total_days} days",
+        }
+    if amt_end:
+        result[end_mk] = {
+            "amount":  amt_end,
+            "formula": f"{days_in_end} of {total_days} days",
+        }
+    return result
+
+
+def add_proration(allocations, formulas, start_str, end_str, amount):
+    """Add prorated amounts AND formula metadata to their respective dicts."""
+    for mk, meta in prorate_with_meta(start_str, end_str, amount).items():
+        allocations[mk] = round(allocations.get(mk, 0.0) + meta["amount"], 2)
+        # Accumulate formula strings if multiple blocks land in same month
+        if meta["formula"]:
+            existing = formulas.get(mk)
+            formulas[mk] = meta["formula"] if not existing else f"{existing}; {meta['formula']}"
 
 
 # ─────────────────────────────────────────────
 # 1. Summary parsing
 # ─────────────────────────────────────────────
 
-# Captures: (premise#) (identifier) (optional -) $(amount) (optional CR) (space or end)
-# Barcode/QR junk after the amount is ignored.
 _BILLED_RE     = re.compile(r"^(\d{9})\s+(.+?)\s+(-?)\$([\d,]+\.\d{2})\s*(CR)?(\s|$)", re.I)
 _NOT_INC_RE    = re.compile(r"^(\d{9})\s+(.+?)\s+NOT\s*INCLUDED(\s|$)", re.I)
 _DATE_IDENT_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
@@ -218,7 +254,6 @@ def _clean_identifier(raw):
     return re.sub(r"\s+", " ", raw).strip().rstrip("_").strip()
 
 def _bill_amount_from_match(m):
-    """Extract signed dollar amount from a _BILLED_RE match."""
     neg = m.group(3) == "-"
     cr  = bool(m.group(5))
     amt = parse_money(m.group(4))
@@ -227,7 +262,6 @@ def _bill_amount_from_match(m):
     return amt
 
 def _bill_amount_from_next_line(nxt):
-    """Extract signed dollar amount from a standalone money line, or None."""
     mm = _MONEY_RE.match(nxt)
     if not mm:
         return None, False
@@ -248,8 +282,6 @@ def parse_summary(pdf):
         i = 0
         while i < len(lines):
             line = lines[i]
-
-            # Fully-contained billed line (positive or credit)
             m = _BILLED_RE.match(line)
             if m:
                 ident = m.group(2).strip()
@@ -261,8 +293,6 @@ def parse_summary(pdf):
                     }
                 i += 1
                 continue
-
-            # Fully-contained NOT INCLUDED line
             m = _NOT_INC_RE.match(line)
             if m:
                 summary[m.group(1)] = {
@@ -272,8 +302,6 @@ def parse_summary(pdf):
                 }
                 i += 1
                 continue
-
-            # Premise# + identifier with amount or NI on NEXT line
             m = _PREM_NUM_RE.match(line)
             if m:
                 pnum  = m.group(1)
@@ -363,29 +391,34 @@ def extract_premises_total(text):
 
 
 # ─────────────────────────────────────────────
-# 4. Premise allocation
+# 4. Premise allocation  (now also returns formula metadata)
 # ─────────────────────────────────────────────
 
 def allocate(text):
+    """
+    Returns (allocations, formulas, premises_total, blocks)
+      allocations : {month_key: float}
+      formulas    : {month_key: str|None}  — day-split description for tooltip
+    """
     blocks         = extract_blocks(text)
     premises_total = extract_premises_total(text)
     allocations    = OrderedDict()
+    formulas       = OrderedDict()
 
     if not blocks or premises_total is None:
-        return allocations, premises_total, blocks
+        return allocations, formulas, premises_total, blocks
 
     # Single block: pro-rate across month boundary if needed
     if len(blocks) == 1:
         b = blocks[0]
-        add_proration(allocations, b["start_date"], b["end_date"], premises_total)
-        return allocations, premises_total, blocks
+        add_proration(allocations, formulas, b["start_date"], b["end_date"], premises_total)
+        return allocations, formulas, premises_total, blocks
 
     # Multiple blocks (meter change)
     total_subtotals = sum(b["subtotal"] for b in blocks if b["subtotal"] is not None)
 
     if total_subtotals > premises_total + 0.005:
-        # OVERFLOW: assign each block's amount to its start month (no pro-ration),
-        # capped by remaining budget.
+        # OVERFLOW: assign each block's amount to its start month, capped by budget
         budget = premises_total
         for block in blocks:
             if block["subtotal"] is None or budget < 0.005:
@@ -394,26 +427,23 @@ def allocate(text):
             mk = month_key(block["start_date"])
             allocations[mk] = round(allocations.get(mk, 0.0) + amount, 2)
             budget = round(budget - amount, 2)
-        # Absorb rounding residual
         diff = round(premises_total - round(sum(allocations.values()), 2), 2)
         if abs(diff) >= 0.01 and allocations:
             last_key = list(allocations.keys())[-1]
             allocations[last_key] = round(allocations[last_key] + diff, 2)
-
     else:
-        # NORMAL: each block's subtotal pro-rated across its month boundary;
-        # remainder goes to end month of last block.
+        # NORMAL: each block's subtotal pro-rated; remainder to end month of last block
         subtotal_sum = 0.0
         for block in blocks:
             if block["subtotal"] is not None:
-                add_proration(allocations, block["start_date"], block["end_date"], block["subtotal"])
+                add_proration(allocations, formulas, block["start_date"], block["end_date"], block["subtotal"])
                 subtotal_sum += block["subtotal"]
         remainder = round(premises_total - subtotal_sum, 2)
         if abs(remainder) >= 0.01:
             end_mk = month_key(blocks[-1]["end_date"])
             allocations[end_mk] = round(allocations.get(end_mk, 0.0) + remainder, 2)
 
-    return allocations, premises_total, blocks
+    return allocations, formulas, premises_total, blocks
 
 
 # ─────────────────────────────────────────────
@@ -425,11 +455,9 @@ _NRC_ITEM_RE    = re.compile(r"^(.+?)\s+\$([\d,]+\.\d{2})(\s|$)")
 
 def parse_non_recurring(pdf):
     """
-    Find NON-RECURRING CHARGES/CREDITS SUMMARY and return list of
-    {"description": str, "amount": float}. Skips header and total lines.
-    Parses across ALL pages as one stream so page breaks don't reset state.
+    Parse NON-RECURRING CHARGES/CREDITS SUMMARY across all pages as one stream
+    so page boundaries don't reset state.
     """
-    # Concatenate all page text first so page boundaries don't break parsing
     full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
     lines = full_text.splitlines()
 
@@ -471,6 +499,7 @@ def parse_non_recurring(pdf):
             unique.append(c)
     return unique
 
+
 # ─────────────────────────────────────────────
 # 5. Bill orchestration
 # ─────────────────────────────────────────────
@@ -485,7 +514,6 @@ def parse_bill(pdf_bytes):
     all_months = set()
 
     for premise, info in summary.items():
-        # Skip NOT INCLUDED (current_bill is None)
         if info["current_bill"] is None:
             continue
 
@@ -494,6 +522,7 @@ def parse_bill(pdf_bytes):
             "premises_identifier": info["premises_identifier"],
             "current_bill":        info["current_bill"],
             "months":              OrderedDict(),
+            "formulas":            OrderedDict(),   # ← new: day-split tooltips
             "total":               None,
             "diff":                None,
             "notes":               "",
@@ -510,9 +539,10 @@ def parse_bill(pdf_bytes):
             row["total"] = info["current_bill"]
             row["diff"]  = 0.0
         elif premise in details:
-            allocs, _, blocks = allocate(details[premise])
-            row["months"] = allocs
-            row["total"]  = round(sum(allocs.values()), 2) if allocs else None
+            allocs, fmls, _, blocks = allocate(details[premise])
+            row["months"]  = allocs
+            row["formulas"] = fmls
+            row["total"]   = round(sum(allocs.values()), 2) if allocs else None
             if row["total"] is not None:
                 row["diff"] = round(info["current_bill"] - row["total"], 2)
             if len(blocks) > 1:
@@ -521,7 +551,6 @@ def parse_bill(pdf_bytes):
                 row["notes"] = "ESTIMATED"
             all_months.update(allocs.keys())
         elif info["current_bill"] is not None:
-            # Has a bill amount but no detail page — put full amount in notes
             row["notes"] = "NO DETAIL PAGE"
 
         rows.append(row)
@@ -533,9 +562,9 @@ def parse_bill(pdf_bytes):
     return rows, sorted_months, non_recurring
 
 
-def thin_border():
-    s = Side(style="thin", color="D9D9D9")
-    return Border(left=s, right=s, top=s, bottom=s)
+# ─────────────────────────────────────────────
+# 6. Excel export  (with proration tooltips)
+# ─────────────────────────────────────────────
 
 MONEY_FMT = '$#,##0.00_);($#,##0.00)'
 HDR_FILL  = PatternFill("solid", start_color="1F1F1F")
@@ -580,10 +609,25 @@ def export_excel(rows, month_cols, statement_number, non_recurring=None):
             c.number_format = MONEY_FMT
 
         for mi, mon in enumerate(month_cols):
-            val = row["months"].get(mon)
-            c = ws.cell(ri, COL_M0 + mi, val)
+            val     = row["months"].get(mon)
+            formula = row.get("formulas", {}).get(mon)
+            c = ws.cell(ri, COL_M0 + mi)
             if val is not None:
-                c.number_format = MONEY_FMT
+                if formula:
+                    # Show as text: "$58.50 (18/31d)"
+                    parts = formula.split(";")
+                    short_parts = []
+                    for p in parts:
+                        p = p.strip()
+                        nums = re.findall(r"\d+", p)
+                        short_parts.append(f"{nums[0]}/{nums[1]}d" if len(nums) >= 2 else p)
+                    short = "; ".join(short_parts)
+                    c.value     = f"${val:,.2f} ({short})"
+                    c.font      = Font(name="Arial", italic=True)
+                    c.alignment = Alignment(horizontal="right")
+                else:
+                    c.value         = val
+                    c.number_format = MONEY_FMT
 
         c = ws.cell(ri, COL_TOTAL, row["total"])
         if row["total"] is not None:
@@ -601,7 +645,7 @@ def export_excel(rows, month_cols, statement_number, non_recurring=None):
             c.border = thin_border()
             c.fill   = ROW_FILL
 
-    # Non-recurring charge rows (late fees, etc.) — yellow highlight
+    # Non-recurring charge rows — yellow highlight
     if non_recurring:
         for nrc in non_recurring:
             nrc_ri = ws.max_row + 1
@@ -609,7 +653,6 @@ def export_excel(rows, month_cols, statement_number, non_recurring=None):
             c = ws.cell(nrc_ri, COL_CB, nrc["amount"])
             c.number_format = MONEY_FMT
             c.font = Font(bold=True, name="Arial")
-            # Place in last month column
             if month_cols:
                 last_m_col = COL_M0 + len(month_cols) - 1
                 c2 = ws.cell(nrc_ri, last_m_col, nrc["amount"])
@@ -702,8 +745,9 @@ else:
                 statement_number = uploaded.name.replace(".pdf", "").replace(".PDF", "")
                 excel_bytes = export_excel(rows, month_cols, statement_number, non_recurring)
 
-                total_bill = sum(r["current_bill"] for r in rows if r["current_bill"])
-                meter_changes = sum(1 for r in rows if "METER CHANGE" in r.get("notes",""))
+                total_bill    = sum(r["current_bill"] for r in rows if r["current_bill"])
+                meter_changes = sum(1 for r in rows if "METER CHANGE" in r.get("notes", ""))
+                prorated      = sum(1 for r in rows if any(r.get("formulas", {}).values()))
 
                 st.markdown(f"""
                 <div class="success-box">✅ Successfully processed <strong>{len(rows)}</strong> billed premises</div>
@@ -725,6 +769,9 @@ else:
                         <div class="stat-lbl">Meter Changes</div>
                     </div>
                 </div>
+                <div class="warn-box" style="background:#eff6ff;border-color:#93c5fd;color:#1e40af;">
+                    💡 <strong>{prorated}</strong> premise(s) were prorated across months — those cells show the day-split inline, e.g. <em>$58.50 (18/31d)</em>.
+                </div>
                 """, unsafe_allow_html=True)
 
                 st.download_button(
@@ -737,4 +784,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v7 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v9 · Forty Acres Energy</div>', unsafe_allow_html=True)
