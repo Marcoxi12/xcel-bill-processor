@@ -191,11 +191,10 @@ def prorate_amount(start_str, end_str, amount):
 
 def prorate_with_meta(start_str, end_str, amount):
     """
-    Like prorate_amount but returns per-month metadata including the
-    day-split formula string used for proration.
+    Like prorate_amount but also returns raw day counts (numerator, denominator)
+    so export_excel can write a real Excel formula like =C2*(17/33).
 
-    Returns OrderedDict {month_key: {"amount": float, "formula": str|None}}
-    formula example: "18 of 31 days"  (None when no split needed)
+    Returns OrderedDict {month_key: {"amount": float, "days": (num, denom) | None}}
     """
     s = parse_date(start_str)
     e = parse_date(end_str)
@@ -204,10 +203,10 @@ def prorate_with_meta(start_str, end_str, amount):
     end_mk   = month_key(end_str)
 
     if total_days <= 0 or start_mk == end_mk:
-        return OrderedDict([(start_mk, {"amount": round(amount, 2), "formula": None})])
+        return OrderedDict([(start_mk, {"amount": round(amount, 2), "days": None})])
 
     if s.month == 12 and e.month == 1:
-        return OrderedDict([(end_mk, {"amount": round(amount, 2), "formula": None})])
+        return OrderedDict([(end_mk, {"amount": round(amount, 2), "days": None})])
 
     last_day_of_start = date(s.year, s.month, calendar.monthrange(s.year, s.month)[1])
     days_in_start = (min(last_day_of_start, e) - s).days
@@ -217,26 +216,19 @@ def prorate_with_meta(start_str, end_str, amount):
 
     result = OrderedDict()
     if amt_start:
-        result[start_mk] = {
-            "amount":  amt_start,
-            "formula": f"{days_in_start} of {total_days} days",
-        }
+        result[start_mk] = {"amount": amt_start, "days": (days_in_start, total_days)}
     if amt_end:
-        result[end_mk] = {
-            "amount":  amt_end,
-            "formula": f"{days_in_end} of {total_days} days",
-        }
+        result[end_mk]   = {"amount": amt_end,   "days": (days_in_end,   total_days)}
     return result
 
 
 def add_proration(allocations, formulas, start_str, end_str, amount):
-    """Add prorated amounts AND formula metadata to their respective dicts."""
+    """Add prorated amounts AND day-fraction tuples to their respective dicts."""
     for mk, meta in prorate_with_meta(start_str, end_str, amount).items():
         allocations[mk] = round(allocations.get(mk, 0.0) + meta["amount"], 2)
-        # Accumulate formula strings if multiple blocks land in same month
-        if meta["formula"]:
-            existing = formulas.get(mk)
-            formulas[mk] = meta["formula"] if not existing else f"{existing}; {meta['formula']}"
+        if meta["days"]:
+            # Store as list of (num, denom) tuples; multiple blocks can land in same month
+            formulas.setdefault(mk, []).append(meta["days"])
 
 
 # ─────────────────────────────────────────────
@@ -455,15 +447,18 @@ _NRC_ITEM_RE    = re.compile(r"^(.+?)\s+\$([\d,]+\.\d{2})(\s|$)")
 
 def parse_non_recurring(pdf):
     """
-    Parse NON-RECURRING CHARGES/CREDITS SUMMARY across all pages as one stream
-    so page boundaries don't reset state.
+    Parse NON-RECURRING CHARGES/CREDITS SUMMARY.
+    Strategy 1: text-stream scan across all pages.
+    Strategy 2: table extraction fallback (handles wide-gap layouts where
+                pdfplumber merges description + amount onto one line with
+                no reliable whitespace separator).
     """
+    charges = []
+
+    # ── Strategy 1: full-text line scan ───────────────────────────────────────
     full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
     lines = full_text.splitlines()
-
-    charges = []
     in_section = False
-
     for line in lines:
         line = line.strip()
         if _NRC_SECTION_RE.search(line):
@@ -471,13 +466,11 @@ def parse_non_recurring(pdf):
             continue
         if not in_section:
             continue
-        # Stop at next major section
         if re.match(
             r"(INFORMATION ABOUT YOUR BILL|PREMISES SUMMARY|ELECTRICITY SERVICE|^Page\s+\d)",
             line, re.I
         ):
             break
-        # Skip header/empty/total lines
         if not line or re.match(r"(DESCRIPTION|CURRENT BILL)", line, re.I):
             continue
         if re.match(r"Total\s+\$", line, re.I):
@@ -487,6 +480,55 @@ def parse_non_recurring(pdf):
             desc = m.group(1).strip()
             amt  = parse_money(m.group(2))
             if desc and amt and amt > 0:
+                charges.append({"description": desc.title(), "amount": amt})
+
+    # ── Strategy 2: table extraction (fallback for wide-gap PDFs) ─────────────
+    if not charges:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            if not _NRC_SECTION_RE.search(text):
+                continue
+            tables = page.extract_tables()
+            for table in tables:
+                in_tbl = False
+                for row in table:
+                    if not row:
+                        continue
+                    row_text = " ".join(str(c) for c in row if c)
+                    if _NRC_SECTION_RE.search(row_text):
+                        in_tbl = True
+                        continue
+                    if not in_tbl:
+                        continue
+                    if re.search(r"(INFORMATION ABOUT|PREMISES SUMMARY|^Total)", row_text, re.I):
+                        break
+                    # Look for a money value anywhere in the row cells
+                    desc_cell = None
+                    amt_cell  = None
+                    for cell in row:
+                        if not cell:
+                            continue
+                        cell = str(cell).strip()
+                        if re.match(r"\$?[\d,]+\.\d{2}$", cell):
+                            try:
+                                amt_cell = parse_money(cell)
+                            except Exception:
+                                pass
+                        elif cell and not re.match(r"(DESCRIPTION|CURRENT BILL)", cell, re.I):
+                            desc_cell = cell
+                    if desc_cell and amt_cell and amt_cell > 0:
+                        charges.append({"description": desc_cell.title(), "amount": amt_cell})
+
+    # ── Strategy 3: regex on raw text looking for amount near known keywords ───
+    if not charges:
+        money_pattern = re.compile(
+            r"(Late\s+Charge|Returned\s+Check|Reconnect|Disconnect|Deposit"
+            r"|Service\s+Fee|Penalty)[^\n$]*\$(\d[\d,]*\.\d{2})", re.I
+        )
+        for m in money_pattern.finditer(full_text):
+            desc = m.group(1).strip()
+            amt  = parse_money(m.group(2))
+            if amt and amt > 0:
                 charges.append({"description": desc.title(), "amount": amt})
 
     # Deduplicate
@@ -609,22 +651,16 @@ def export_excel(rows, month_cols, statement_number, non_recurring=None):
             c.number_format = MONEY_FMT
 
         for mi, mon in enumerate(month_cols):
-            val     = row["months"].get(mon)
-            formula = row.get("formulas", {}).get(mon)
+            val      = row["months"].get(mon)
+            day_list = row.get("formulas", {}).get(mon)  # list of (num, denom) tuples or None
             c = ws.cell(ri, COL_M0 + mi)
             if val is not None:
-                if formula:
-                    # Show as text: "$58.50 (18/31d)"
-                    parts = formula.split(";")
-                    short_parts = []
-                    for p in parts:
-                        p = p.strip()
-                        nums = re.findall(r"\d+", p)
-                        short_parts.append(f"{nums[0]}/{nums[1]}d" if len(nums) >= 2 else p)
-                    short = "; ".join(short_parts)
-                    c.value     = f"${val:,.2f} ({short})"
-                    c.font      = Font(name="Arial", italic=True)
-                    c.alignment = Alignment(horizontal="right")
+                cb_col = get_column_letter(COL_CB)
+                if day_list:
+                    # Build real Excel formula: =C2*(17/33)  or =C2*(17/33+6/33) for multi-block
+                    fractions = "+".join(f"{num}/{denom}" for num, denom in day_list)
+                    c.value         = f"={cb_col}{ri}*({fractions})"
+                    c.number_format = MONEY_FMT
                 else:
                     c.value         = val
                     c.number_format = MONEY_FMT
@@ -784,4 +820,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v9 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v10 · Forty Acres Energy</div>', unsafe_allow_html=True)
