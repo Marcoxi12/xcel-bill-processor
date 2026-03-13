@@ -159,12 +159,15 @@ def thin_border():
 
 def _month_day_buckets(s, e):
     """
-    Given start date s (inclusive) and end date e (exclusive-ish, i.e. the
-    read-end date), return an OrderedDict {month_key: days_count} by walking
-    month boundaries between s and e.
+    Xcel counts days as (end_date - start_date): the start date itself is NOT
+    counted as a billed day. e.g. 10/05->11/05 = 31 days: Oct=26, Nov=5.
+
+    We walk day-by-day from s+1 (first billed day) through e (last billed day)
+    inclusive, bucketing each day into its calendar month.
 
     Special rule: Dec->Jan period puts ALL days into January.
     """
+    from datetime import timedelta
     total_days = (e - s).days
     if total_days <= 0:
         return OrderedDict([(f"{s.month}/{s.year % 100:02d}", 0)])
@@ -175,16 +178,11 @@ def _month_day_buckets(s, e):
         return OrderedDict([(mk, total_days)])
 
     buckets = OrderedDict()
-    cur = s
-    while cur < e:
-        # Last day of cur's month
-        last = date(cur.year, cur.month, calendar.monthrange(cur.year, cur.month)[1])
-        # Days from cur until end of this month (or end of period, whichever first)
-        chunk_end = min(last + __import__('datetime').timedelta(days=1), e)
-        days = (chunk_end - cur).days
+    cur = s + timedelta(days=1)   # start day is NOT counted
+    while cur <= e:               # end day IS counted
         mk = f"{cur.month}/{cur.year % 100:02d}"
-        buckets[mk] = buckets.get(mk, 0) + days
-        cur = chunk_end
+        buckets[mk] = buckets.get(mk, 0) + 1
+        cur += timedelta(days=1)
 
     return buckets
 
@@ -257,12 +255,19 @@ def prorate_with_meta(start_str, end_str, amount):
     return result
 
 
-def add_proration(allocations, formulas, start_str, end_str, amount):
-    """Add prorated amounts AND day-fraction tuples to their respective dicts."""
+def add_proration(allocations, formulas, start_str, end_str, amount, block_subtotal=None):
+    """
+    Add prorated amounts AND formula metadata to their respective dicts.
+    block_subtotal: if provided, the formula term uses this fixed dollar amount
+                    instead of referencing the premises-total cell, e.g. for
+                    multi-block meter-change premises where each block has its
+                    own subtotal. Stored as {"subtotal": float, "days": (n,d)}.
+    """
     for mk, meta in prorate_with_meta(start_str, end_str, amount).items():
         allocations[mk] = round(allocations.get(mk, 0.0) + meta["amount"], 2)
         if meta["days"]:
-            formulas.setdefault(mk, []).append(meta["days"])
+            entry = {"days": meta["days"], "subtotal": block_subtotal}
+            formulas.setdefault(mk, []).append(entry)
 
 
 # ─────────────────────────────────────────────
@@ -462,7 +467,12 @@ def allocate(text):
         subtotal_sum = 0.0
         for block in blocks:
             if block["subtotal"] is not None:
-                add_proration(allocations, formulas, block["start_date"], block["end_date"], block["subtotal"])
+                # Pass block subtotal so formula shows fixed $amount*(days/total)
+                # instead of referencing premises-total cell
+                add_proration(allocations, formulas,
+                              block["start_date"], block["end_date"],
+                              block["subtotal"],
+                              block_subtotal=block["subtotal"])
                 subtotal_sum += block["subtotal"]
         remainder = round(premises_total - subtotal_sum, 2)
         if abs(remainder) >= 0.01:
@@ -686,14 +696,23 @@ def export_excel(rows, month_cols, statement_number, non_recurring=None):
 
         for mi, mon in enumerate(month_cols):
             val      = row["months"].get(mon)
-            day_list = row.get("formulas", {}).get(mon)  # list of (num, denom) tuples or None
+            day_list = row.get("formulas", {}).get(mon)  # list of formula entry dicts or None
             c = ws.cell(ri, COL_M0 + mi)
             if val is not None:
                 cb_col = get_column_letter(COL_CB)
                 if day_list:
-                    # Build real Excel formula: =C2*(17/33)  or =C2*(17/33+6/33) for multi-block
-                    fractions = "+".join(f"{num}/{denom}" for num, denom in day_list)
-                    c.value         = f"={cb_col}{ri}*({fractions})"
+                    # Build Excel formula showing each block's contribution:
+                    # Single block (no subtotal override): =C2*(26/31)
+                    # Multi-block (each has own subtotal):  =$62.80*(10/10)+$233.47*(15/20)
+                    terms = []
+                    all_have_subtotal = all(e["subtotal"] is not None for e in day_list)
+                    for entry in day_list:
+                        num, denom = entry["days"]
+                        if all_have_subtotal and entry["subtotal"] is not None:
+                            terms.append(f"${entry['subtotal']:,.2f}*({num}/{denom})")
+                        else:
+                            terms.append(f"{cb_col}{ri}*({num}/{denom})")
+                    c.value         = "=" + "+".join(terms)
                     c.number_format = MONEY_FMT
                 else:
                     c.value         = val
@@ -854,4 +873,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v11 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v13 · Forty Acres Energy</div>', unsafe_allow_html=True)
