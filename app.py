@@ -377,9 +377,23 @@ def extract_detail_sections(pdf):
 # 3. Block extraction
 # ─────────────────────────────────────────────
 
-_DATE_RE = re.compile(
+_DATE_RE       = re.compile(
     r"Read\s*Dates:\s*(\d{2}/\d{2}/\d{2})\s*-\s*(\d{2}/\d{2}/\d{2})", re.I)
-_SUB_RE  = re.compile(r"Sub\s*total\s*\$([\d,]+\.\d{2})", re.I)
+_SUB_RE        = re.compile(r"Sub\s*total\s*\$([\d,]+\.\d{2})", re.I)
+_BARE_TOTAL_RE = re.compile(r"\bTotal\s*\$([\d,]+\.\d{2})", re.I)
+_EXCL_RE       = re.compile(r"(Premises|Sales\s*Tax)", re.I)
+
+def _block_bare_total(block_text):
+    """
+    Fallback: find a bare 'Total $X' in block text when no Subtotal line exists.
+    Skips 'Premises Total' and lines preceded by 'Sales Tax'.
+    Used for blocks like Block 1 of 300292270 that have only a Total, no Subtotal.
+    """
+    for m in _BARE_TOTAL_RE.finditer(block_text):
+        before = block_text[max(0, m.start() - 30):m.start()]
+        if not _EXCL_RE.search(before):
+            return parse_money(m.group(1))
+    return None
 
 def extract_blocks(text):
     flat = re.sub(r"\s+", " ", text)
@@ -390,6 +404,7 @@ def extract_blocks(text):
     for i, dm in enumerate(date_matches):
         block_start = dm.end()
         block_end   = date_matches[i+1].start() if i+1 < len(date_matches) else len(flat)
+        block_text  = flat[block_start:block_end]
         subtotal    = None
         while sub_idx < len(sub_matches):
             sm = sub_matches[sub_idx]
@@ -401,6 +416,9 @@ def extract_blocks(text):
                 break
             else:
                 break
+        # Fallback: if no Subtotal line found, try a bare Total line
+        if subtotal is None:
+            subtotal = _block_bare_total(block_text)
         blocks.append({
             "start_date": dm.group(1),
             "end_date":   dm.group(2),
@@ -869,4 +887,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v15 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v16 · Forty Acres Energy</div>', unsafe_allow_html=True)
