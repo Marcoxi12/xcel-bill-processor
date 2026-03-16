@@ -381,7 +381,7 @@ _DATE_RE       = re.compile(
     r"Read\s*Dates:\s*(\d{2}/\d{2}/\d{2})\s*-\s*(\d{2}/\d{2}/\d{2})", re.I)
 _SUB_RE        = re.compile(r"Sub\s*total\s*\$([\d,]+\.\d{2})", re.I)
 _BARE_TOTAL_RE = re.compile(r"\bTotal\s*\$([\d,]+\.\d{2})", re.I)
-_EXCL_RE       = re.compile(r"(Premises|Sales\s*Tax)", re.I)
+_EXCL_RE       = re.compile(r"(Premises|Sales\s*Tax|SalesTax)", re.I)
 
 def _block_bare_total(block_text):
     """
@@ -887,4 +887,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v16 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v17 · Forty Acres Energy</div>', unsafe_allow_html=True)
