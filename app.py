@@ -442,15 +442,18 @@ def allocate(text):
     total_subtotals = sum(b["subtotal"] for b in blocks if b["subtotal"] is not None)
 
     if total_subtotals > premises_total + 0.005:
-        # OVERFLOW: assign each block's amount to its start month, capped by budget
-        budget = premises_total
+        # OVERFLOW: block subtotals exceed premises total (overlapping reads or
+        # subtotals excluding tax). Scale each block proportionally to fit
+        # premises_total, then prorate across month boundaries like NORMAL.
         for block in blocks:
-            if block["subtotal"] is None or budget < 0.005:
-                break
-            amount = min(block["subtotal"], round(budget, 2))
-            mk = month_key(block["start_date"])
-            allocations[mk] = round(allocations.get(mk, 0.0) + amount, 2)
-            budget = round(budget - amount, 2)
+            if block["subtotal"] is None:
+                continue
+            scaled = round(block["subtotal"] * premises_total / total_subtotals, 2)
+            add_proration(allocations, formulas,
+                          block["start_date"], block["end_date"],
+                          scaled,
+                          block_subtotal=scaled)
+        # Fix rounding drift
         diff = round(premises_total - round(sum(allocations.values()), 2), 2)
         if abs(diff) >= 0.01 and allocations:
             last_key = list(allocations.keys())[-1]
@@ -866,4 +869,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v14 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v15 · Forty Acres Energy</div>', unsafe_allow_html=True)
