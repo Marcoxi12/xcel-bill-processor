@@ -164,18 +164,11 @@ def _month_day_buckets(s, e):
 
     We walk day-by-day from s+1 (first billed day) through e (last billed day)
     inclusive, bucketing each day into its calendar month.
-
-    Special rule: Dec->Jan period puts ALL days into January.
     """
     from datetime import timedelta
     total_days = (e - s).days
     if total_days <= 0:
         return OrderedDict([(f"{s.month}/{s.year % 100:02d}", 0)])
-
-    # Dec -> Jan special case: full amount goes to January
-    if s.month == 12 and e.month == 1:
-        mk = f"{e.month}/{e.year % 100:02d}"
-        return OrderedDict([(mk, total_days)])
 
     buckets = OrderedDict()
     cur = s + timedelta(days=1)   # start day is NOT counted
@@ -873,4 +866,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v13 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v14 · Forty Acres Energy</div>', unsafe_allow_html=True)
