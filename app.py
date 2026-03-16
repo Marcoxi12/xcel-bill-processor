@@ -377,22 +377,30 @@ def extract_detail_sections(pdf):
 # 3. Block extraction
 # ─────────────────────────────────────────────
 
-_DATE_RE       = re.compile(
-    r"Read\s*Dates:\s*(\d{2}/\d{2}/\d{2})\s*-\s*(\d{2}/\d{2}/\d{2})", re.I)
-_SUB_RE        = re.compile(r"Sub\s*total\s*\$([\d,]+\.\d{2})", re.I)
 _BARE_TOTAL_RE = re.compile(r"\bTotal\s*\$([\d,]+\.\d{2})", re.I)
-_EXCL_RE       = re.compile(r"(Premises|Sales\s*Tax|SalesTax)", re.I)
+
+_EXCL_RE = re.compile(
+    r"(Premises\s*Total|Sales\s*Tax|SalesTax)", re.I
+)
 
 def _block_bare_total(block_text):
     """
-    Fallback: find a bare 'Total $X' in block text when no Subtotal line exists.
-    Skips 'Premises Total' and lines preceded by 'Sales Tax'.
-    Used for blocks like Block 1 of 300292270 that have only a Total, no Subtotal.
+    Fallback: find a bare 'Total $X' inside a block when no Subtotal exists.
+    Excludes:
+        Premises Total
+        Sales Tax / SalesTax
     """
+
     for m in _BARE_TOTAL_RE.finditer(block_text):
-        before = block_text[max(0, m.start() - 30):m.start()]
-        if not _EXCL_RE.search(before):
-            return parse_money(m.group(1))
+
+        # look at preceding context
+        context = block_text[max(0, m.start()-40):m.start()]
+
+        if _EXCL_RE.search(context):
+            continue
+
+        return parse_money(m.group(1))
+
     return None
 
 def extract_blocks(text):
