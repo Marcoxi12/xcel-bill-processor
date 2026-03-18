@@ -884,9 +884,7 @@ else:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
-
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
- 
-st.markdown('<div class="footer">Xcel Bill Processor v17 · Forty Acres Energy</div>', unsafe_allow_html=True)
 
+st.markdown('<div class="footer">Xcel Bill Processor v17 · Forty Acres Energy</div>', unsafe_allow_html=True)
