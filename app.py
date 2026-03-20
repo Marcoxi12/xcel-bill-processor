@@ -218,20 +218,23 @@ def prorate_with_meta(start_str, end_str, amount):
     Like prorate_amount but also returns raw day counts (numerator, denominator)
     so export_excel can write a real Excel formula like =C2*(17/33).
 
-    Returns OrderedDict {month_key: {"amount": float, "days": (num, denom) | None}}
-    Handles periods spanning more than two calendar months correctly.
+    Returns OrderedDict {month_key: {"amount": float, "days": (num, denom)}}
+    days is ALWAYS populated so formula entries are created for all blocks,
+    including single-month blocks in multi-block premises.
     """
     s = parse_date(start_str)
     e = parse_date(end_str)
     total_days = (e - s).days
 
     if total_days <= 0:
-        return OrderedDict([(month_key(start_str), {"amount": round(amount, 2), "days": None})])
+        mk = month_key(start_str)
+        return OrderedDict([(mk, {"amount": round(amount, 2), "days": (1, 1)})])
 
     buckets = _month_day_buckets(s, e)
     if len(buckets) == 1:
         mk = list(buckets.keys())[0]
-        return OrderedDict([(mk, {"amount": round(amount, 2), "days": None})])
+        days = list(buckets.values())[0] or total_days
+        return OrderedDict([(mk, {"amount": round(amount, 2), "days": (days, total_days)})])
 
     result = OrderedDict()
     allocated = 0.0
@@ -258,9 +261,8 @@ def add_proration(allocations, formulas, start_str, end_str, amount, block_subto
     """
     for mk, meta in prorate_with_meta(start_str, end_str, amount).items():
         allocations[mk] = round(allocations.get(mk, 0.0) + meta["amount"], 2)
-        if meta["days"]:
-            entry = {"days": meta["days"], "subtotal": block_subtotal}
-            formulas.setdefault(mk, []).append(entry)
+        entry = {"days": meta["days"], "subtotal": block_subtotal}
+        formulas.setdefault(mk, []).append(entry)
 
 
 # ─────────────────────────────────────────────
@@ -888,4 +890,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v19 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v20 · Forty Acres Energy</div>', unsafe_allow_html=True)
