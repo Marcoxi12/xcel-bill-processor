@@ -723,7 +723,8 @@ def export_excel(rows, month_cols, statement_number, non_recurring=None):
                     for entry in day_list:
                         num, denom = entry["days"]
                         if all_have_subtotal and entry["subtotal"] is not None:
-                            terms.append(f"${entry['subtotal']:,.2f}*({num}/{denom})")
+                            # No $ prefix — Excel treats $ as absolute cell ref
+                            terms.append(f"{entry['subtotal']:,.2f}*({num}/{denom})")
                         else:
                             terms.append(f"{cb_col}{ri}*({num}/{denom})")
                     c.value         = "=" + "+".join(terms)
@@ -887,4 +888,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v17 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v18 · Forty Acres Energy</div>', unsafe_allow_html=True)
