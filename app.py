@@ -426,6 +426,19 @@ def extract_blocks(text):
             "end_date":   dm.group(2),
             "subtotal":   subtotal,
         })
+
+    # Detect cumulative grand subtotal: if the last block's subtotal is >= sum
+    # of all previous blocks' subtotals, it's a premise-level grand total that
+    # accumulated all prior blocks (e.g. 3-block bill where the final Subtotal
+    # covers all three blocks combined).
+    # Fix: replace it with the incremental amount = grand_subtotal - prev_sum.
+    if len(blocks) > 1:
+        prev_sum = sum(b["subtotal"] for b in blocks[:-1] if b["subtotal"] is not None)
+        last = blocks[-1]["subtotal"]
+        if last is not None and prev_sum > 0 and last >= prev_sum - 0.005:
+            incremental = round(last - prev_sum, 2)
+            blocks[-1]["subtotal"] = incremental if incremental > 0 else None
+
     return blocks
 
 def extract_premises_total(text):
@@ -479,12 +492,10 @@ def allocate(text):
             last_key = list(allocations.keys())[-1]
             allocations[last_key] = round(allocations[last_key] + diff, 2)
     else:
-        # NORMAL: each block's subtotal pro-rated; remainder to end month of last block
+        # NORMAL: each block's subtotal pro-rated; remainder (e.g. tax) to last month
         subtotal_sum = 0.0
         for block in blocks:
             if block["subtotal"] is not None:
-                # Pass block subtotal so formula shows fixed $amount*(days/total)
-                # instead of referencing premises-total cell
                 add_proration(allocations, formulas,
                               block["start_date"], block["end_date"],
                               block["subtotal"],
@@ -494,6 +505,12 @@ def allocate(text):
         if abs(remainder) >= 0.01:
             end_mk = month_key(blocks[-1]["end_date"])
             allocations[end_mk] = round(allocations.get(end_mk, 0.0) + remainder, 2)
+            # Absorb remainder into last formula entry for that month so the
+            # Excel formula stays accurate (remainder is typically sales tax)
+            if end_mk in formulas and formulas[end_mk]:
+                last_entry = formulas[end_mk][-1]
+                if last_entry["subtotal"] is not None:
+                    last_entry["subtotal"] = round(last_entry["subtotal"] + remainder, 2)
 
     return allocations, formulas, premises_total, blocks
 
@@ -890,4 +907,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v20 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v23 · Forty Acres Energy</div>', unsafe_allow_html=True)
