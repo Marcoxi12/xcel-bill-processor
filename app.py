@@ -492,7 +492,7 @@ def allocate(text):
         if abs(diff) >= 0.01 and allocations:
             last_key = list(allocations.keys())[-1]
             allocations[last_key] = round(allocations[last_key] + diff, 2)
-    else:
+            
     # FIXED: prorate FULL block totals (subtotal + tax proportionally)
 
 total_subtotals = sum(b["subtotal"] for b in blocks if b["subtotal"] is not None)
