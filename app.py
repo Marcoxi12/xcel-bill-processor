@@ -495,14 +495,19 @@ def allocate(text):
             
     # FIXED: prorate FULL block totals (subtotal + tax proportionally)
 
-total_subtotals = sum(b["subtotal"] for b in blocks if b["subtotal"] is not None)
+# FIXED: prorate FULL block totals (subtotal + tax proportionally)
+
+total_subtotals = sum(
+    b["subtotal"] for b in blocks if b["subtotal"] is not None
+)
 
 for block in blocks:
     if block["subtotal"] is None:
         continue
 
-    # allocate proportional share of total invoice to each block
-    block_total = round(block["subtotal"] / total_subtotals * premises_total, 2)
+    block_total = round(
+        block["subtotal"] / total_subtotals * premises_total, 2
+    )
 
     add_proration(
         allocations,
@@ -514,11 +519,19 @@ for block in blocks:
     )
 
 # Fix rounding drift
-diff = round(premises_total - round(sum(allocations.values()), 2), 2)
+diff = round(
+    premises_total - round(sum(allocations.values()), 2),
+    2
+)
+
 if abs(diff) >= 0.01 and allocations:
     last_key = list(allocations.keys())[-1]
-    allocations[last_key] = round(allocations[last_key] + diff, 2)
-    return allocations, formulas, premises_total, blocks
+    allocations[last_key] = round(
+        allocations[last_key] + diff,
+        2
+    )
+
+return allocations, formulas, premises_total, blocks
 
 # ─────────────────────────────────────────────
 # 4b. Non-recurring charges parsing
