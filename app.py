@@ -427,12 +427,13 @@ def extract_blocks(text):
             "subtotal":   subtotal,
         })
 
-    # Detect cumulative grand subtotal: if the last block's subtotal is >= sum
-    # of all previous blocks' subtotals, it's a premise-level grand total that
-    # accumulated all prior blocks (e.g. 3-block bill where the final Subtotal
-    # covers all three blocks combined).
-    # Fix: replace it with the incremental amount = grand_subtotal - prev_sum.
-    if len(blocks) > 1:
+    # Detect cumulative grand subtotal: only applies to 3+ block premises where
+    # the final Subtotal line covers ALL blocks combined (not just the last block).
+    # Example: WEU CIF#3 had 3 blocks where the last "Subtotal $14,843.58" was
+    # really the grand total of all three.
+    # We detect this only for 3+ blocks to avoid incorrectly firing on 2-block
+    # premises where block2 simply has a larger subtotal than block1.
+    if len(blocks) > 2:
         prev_sum = sum(b["subtotal"] for b in blocks[:-1] if b["subtotal"] is not None)
         last = blocks[-1]["subtotal"]
         if last is not None and prev_sum > 0 and last >= prev_sum - 0.005:
@@ -907,4 +908,4 @@ else:
         except Exception as e:
             st.markdown(f'<div class="warn-box">❌ Error processing file: {str(e)}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">Xcel Bill Processor v23 · Forty Acres Energy</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Xcel Bill Processor v24 · Forty Acres Energy</div>', unsafe_allow_html=True)
