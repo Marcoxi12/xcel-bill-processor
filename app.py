@@ -512,7 +512,6 @@ for block in blocks:
         block_total,
         block_subtotal=block_total
     )
-    return allocations, formulas, premises_total, blocks
 
 # Fix rounding drift
 diff = round(premises_total - round(sum(allocations.values()), 2), 2)
