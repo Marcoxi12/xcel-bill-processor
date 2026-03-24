@@ -518,7 +518,7 @@ diff = round(premises_total - round(sum(allocations.values()), 2), 2)
 if abs(diff) >= 0.01 and allocations:
     last_key = list(allocations.keys())[-1]
     allocations[last_key] = round(allocations[last_key] + diff, 2)
-   return allocations, formulas, premises_total, blocks
+    return allocations, formulas, premises_total, blocks
 
 # ─────────────────────────────────────────────
 # 4b. Non-recurring charges parsing
