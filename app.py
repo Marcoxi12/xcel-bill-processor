@@ -493,25 +493,31 @@ def allocate(text):
             last_key = list(allocations.keys())[-1]
             allocations[last_key] = round(allocations[last_key] + diff, 2)
     else:
-        # NORMAL: each block's subtotal pro-rated; remainder (e.g. tax) to last month
-        subtotal_sum = 0.0
-        for block in blocks:
-            if block["subtotal"] is not None:
-                add_proration(allocations, formulas,
-                              block["start_date"], block["end_date"],
-                              block["subtotal"],
-                              block_subtotal=block["subtotal"])
-                subtotal_sum += block["subtotal"]
-        remainder = round(premises_total - subtotal_sum, 2)
-        if abs(remainder) >= 0.01:
-            end_mk = month_key(blocks[-1]["end_date"])
-            allocations[end_mk] = round(allocations.get(end_mk, 0.0) + remainder, 2)
-            # Absorb remainder into last formula entry for that month so the
-            # Excel formula stays accurate (remainder is typically sales tax)
-            if end_mk in formulas and formulas[end_mk]:
-                last_entry = formulas[end_mk][-1]
-                if last_entry["subtotal"] is not None:
-                    last_entry["subtotal"] = round(last_entry["subtotal"] + remainder, 2)
+    # FIXED: prorate FULL block totals (subtotal + tax proportionally)
+
+total_subtotals = sum(b["subtotal"] for b in blocks if b["subtotal"] is not None)
+
+for block in blocks:
+    if block["subtotal"] is None:
+        continue
+
+    # allocate proportional share of total invoice to each block
+    block_total = round(block["subtotal"] / total_subtotals * premises_total, 2)
+
+    add_proration(
+        allocations,
+        formulas,
+        block["start_date"],
+        block["end_date"],
+        block_total,
+        block_subtotal=block_total
+    )
+
+# Fix rounding drift
+diff = round(premises_total - round(sum(allocations.values()), 2), 2)
+if abs(diff) >= 0.01 and allocations:
+    last_key = list(allocations.keys())[-1]
+    allocations[last_key] = round(allocations[last_key] + diff, 2)
 
     return allocations, formulas, premises_total, blocks
 
