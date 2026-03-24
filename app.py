@@ -453,85 +453,82 @@ def extract_premises_total(text):
 # ─────────────────────────────────────────────
 
 def allocate(text):
-    """
-    Returns (allocations, formulas, premises_total, blocks)
-      allocations : {month_key: float}
-      formulas    : {month_key: str|None}  — day-split description for tooltip
-    """
-    blocks         = extract_blocks(text)
+    blocks = extract_blocks(text)
     premises_total = extract_premises_total(text)
-    allocations    = OrderedDict()
-    formulas       = OrderedDict()
+    allocations = OrderedDict()
+    formulas = OrderedDict()
 
     if not blocks or premises_total is None:
         return allocations, formulas, premises_total, blocks
 
-    # Single block: pro-rate across month boundary if needed
+    # SINGLE BLOCK
     if len(blocks) == 1:
         b = blocks[0]
-        add_proration(allocations, formulas, b["start_date"], b["end_date"], premises_total)
+        add_proration(
+            allocations,
+            formulas,
+            b["start_date"],
+            b["end_date"],
+            premises_total
+        )
         return allocations, formulas, premises_total, blocks
 
-    # Multiple blocks (meter change)
-    total_subtotals = sum(b["subtotal"] for b in blocks if b["subtotal"] is not None)
+    # MULTI BLOCK (FIXED LOGIC)
+    total_subtotals = sum(
+        b["subtotal"] for b in blocks if b["subtotal"] is not None
+    )
 
+    # Handle overflow case
     if total_subtotals > premises_total + 0.005:
-        # OVERFLOW: block subtotals exceed premises total (overlapping reads or
-        # subtotals excluding tax). Scale each block proportionally to fit
-        # premises_total, then prorate across month boundaries like NORMAL.
         for block in blocks:
             if block["subtotal"] is None:
                 continue
-            scaled = round(block["subtotal"] * premises_total / total_subtotals, 2)
-            add_proration(allocations, formulas,
-                          block["start_date"], block["end_date"],
-                          scaled,
-                          block_subtotal=scaled)
-        # Fix rounding drift
-        diff = round(premises_total - round(sum(allocations.values()), 2), 2)
-        if abs(diff) >= 0.01 and allocations:
-            last_key = list(allocations.keys())[-1]
-            allocations[last_key] = round(allocations[last_key] + diff, 2)
-            
-    # FIXED: prorate FULL block totals (subtotal + tax proportionally)
 
-# FIXED: prorate FULL block totals (subtotal + tax proportionally)
+            scaled = round(
+                block["subtotal"] * premises_total / total_subtotals, 2
+            )
 
-total_subtotals = sum(
-    b["subtotal"] for b in blocks if b["subtotal"] is not None
-)
+            add_proration(
+                allocations,
+                formulas,
+                block["start_date"],
+                block["end_date"],
+                scaled,
+                block_subtotal=scaled
+            )
+    else:
+        # ✅ THIS IS YOUR FIX (correct tax allocation)
+        for block in blocks:
+            if block["subtotal"] is None:
+                continue
 
-for block in blocks:
-    if block["subtotal"] is None:
-        continue
+            block_total = round(
+                block["subtotal"] / total_subtotals * premises_total, 2
+            )
 
-    block_total = round(
-        block["subtotal"] / total_subtotals * premises_total, 2
-    )
+            add_proration(
+                allocations,
+                formulas,
+                block["start_date"],
+                block["end_date"],
+                block_total,
+                block_subtotal=block_total
+            )
 
-    add_proration(
-        allocations,
-        formulas,
-        block["start_date"],
-        block["end_date"],
-        block_total,
-        block_subtotal=block_total
-    )
-
-# Fix rounding drift
-diff = round(
-    premises_total - round(sum(allocations.values()), 2),
-    2
-)
-
-if abs(diff) >= 0.01 and allocations:
-    last_key = list(allocations.keys())[-1]
-    allocations[last_key] = round(
-        allocations[last_key] + diff,
+    # Fix rounding drift
+    diff = round(
+        premises_total - round(sum(allocations.values()), 2),
         2
     )
 
-return allocations, formulas, premises_total, blocks
+    if abs(diff) >= 0.01 and allocations:
+        last_key = list(allocations.keys())[-1]
+        allocations[last_key] = round(
+            allocations[last_key] + diff,
+            2
+        )
+
+    return allocations, formulas, premises_total, blocks
 
 # ─────────────────────────────────────────────
 # 4b. Non-recurring charges parsing
